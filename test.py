@@ -32,6 +32,8 @@ VECTOR_STORE = Chroma(
     persist_directory="./chroma_db"  # 数据持久化到本地文件夹
 )
 
+VECTOR_STORE.persist() # 确保目录存在并加载数据
+
 # LLM 配置 (使用你的配置)
 llm = ChatOpenAI(
     model="qwen-plus",
@@ -84,6 +86,7 @@ def memory_manager_node(state: State):
     节点：管理短期记忆。
     如果消息太多，就归档旧消息到向量库，并从 State 中删除它们。
     """
+
     messages = state["messages"]
     
     # 如果消息数超过窗口限制
@@ -101,36 +104,74 @@ def memory_manager_node(state: State):
 
 def query_rewriter_node(state: State):
     """
-    节点：查询重写。
-    结合短期记忆，把用户的最后一句话改写成独立的搜索查询。
+    节点：查询重写（修复版）。
+    增加了 Few-Shot 示例和强约束，防止 LLM 直接回答用户问题。
     """
     messages = state["messages"]
     last_user_msg = messages[-1].content
     
-    # 如果只是第一句话，或者历史很短，可能不需要改写，但为了统一流程，我们还是做一下
-    if len(messages) <= 1:
-        return {"search_query": last_user_msg}
+    # 获取除最后一条外的历史消息作为上下文
+    history_msgs = messages[:-1]
+    
+    # 将历史消息格式化为文本，供 Prompt 使用
+    history_text = "\n".join([f"{m.type}: {m.content}" for m in history_msgs])
 
-    # Prompt: 让 LLM 结合上下文澄清问题
-    system_prompt = """你是一个专业的查询改写助手。
-    你的任务是将用户最新的问题改写成一个独立的、语义完整的搜索查询。
-    用户的问题可能包含指代词（如“它”、“那个”），你需要根据聊天历史将其补全。
-    只返回改写后的查询，不要解释。"""
+    # --- 核心修改：强化 Prompt ---
+    system_prompt = """你是一个【查询重写工具】，而不是聊天机器人。你的任务是将用户的输入改写为独立的搜索语句。
+
+    ### 核心规则：
+    1. 【绝对禁止】回答用户的问题。无论用户问什么，你只负责改写。
+    2. 结合聊天历史（Chat History），将用户输入（User Input）中的指代词（如“它”、“那个”、“之前提到的”）替换为具体名词。
+    3. 如果用户问题依赖上文（例如“我叫什么？”），请补全主语（例如“用户叫什么名字”）。
+    4. 如果用户输入已经独立且完整，直接原样返回。
+    5. 输出必须纯净，不要包含“好的”、“改写如下”等废话。
+
+    ### 示例演示（Few-Shot）：
+    Case 1:
+    Chat History: 
+    human: 我喜欢苹果。
+    ai: 苹果很好吃。
+    User Input: 它是什么颜色的？
+    Output: 苹果是什么颜色的
+
+    Case 2:
+    Chat History: 
+    human: 我叫小明。
+    ai: 你好小明。
+    User Input: 我叫什么？
+    Output: 小明的名字是什么
+
+    Case 3:
+    Chat History: (无)
+    User Input: 你好
+    Output: 你好
+
+    Case 4:
+    Chat History: ...
+    User Input: 记得我吗？
+    Output: AI是否记得用户
+    """
     
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        ("placeholder", "{chat_history}"),
-        ("human", "{question}"),
+        ("human", "Chat History:\n{history}\n\nUser Input: {question}\nOutput:")
     ])
     
-    # 排除最后一条消息作为历史，最后一条是当前问题
-    history = messages[:-1]
-    chain = prompt | llm | StrOutputParser()
+    # 强制使用 temperature=0，保证逻辑确定性
+    rewriter_llm = llm.bind(temperature=0)
     
-    rewritten_query = chain.invoke({"chat_history": history, "question": last_user_msg})
+    chain = prompt | rewriter_llm | StrOutputParser()
+    
+    # 执行改写
+    rewritten_query = chain.invoke({"history": history_text, "question": last_user_msg})
+    
+    # 清理一下可能残留的空格或换行
+    rewritten_query = rewritten_query.strip()
+    
     print(f"\n[系统] 原始问题: {last_user_msg} -> 改写后检索词: {rewritten_query}")
     
     return {"search_query": rewritten_query}
+
 
 def retriever_node(state: State):
     """
@@ -145,7 +186,7 @@ def retriever_node(state: State):
     context_text = "\n\n".join([d.page_content for d in docs])
     
     if context_text:
-        print(f"[系统] 检索到长期记忆: {context_text[:50]}...")
+        print(f"[系统] 检索到长期记忆: {context_text}")
     else:
         print("[系统] 未检索到相关长期记忆。")
         context_text = "无相关历史记录。"
