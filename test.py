@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 import os
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'  # 设置 HuggingFace 镜像加速
+
 import uuid
 import sqlite3
 from typing import TypedDict, Annotated, List
 from operator import itemgetter
-
-# LangChain / LangGraph imports
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, RemoveMessage, BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
@@ -16,289 +16,272 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph.message import add_messages
 
-# ================= 配置区域 =================
-# 为了演示效果，我们将短期记忆窗口设置得很小，以便快速触发“归档”动作
-SHORT_TERM_WINDOW_SIZE = 4  # 保留最近的4条消息
-SUMMARY_BATCH_SIZE = 2      # 每次超限时，归档最早的2条消息
 
-# 使用 HuggingFace 的轻量级模型进行 Embeddings（免费，本地运行）
-# 第一次运行会自动下载模型 (约 80MB)
-EMBEDDING_MODEL = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+# 全局配置
+SHORT_TERM_WINDOW_SIZE = 4  # 短期记忆窗口大小（消息条数），先设置为4条
+SUMMARY_BATCH_SIZE = 2      # 当短期记忆超出4条的时候，一次性归档两条消息（用户和AI各一条）
+EMBEDDING_MODEL = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")  # 采用的词向量嵌入模型
 
-# 初始化本地向量数据库
+# 初始化本地向量数据库，用于长期记忆存储
 VECTOR_STORE = Chroma(
     collection_name="long_term_memory",
     embedding_function=EMBEDDING_MODEL,
     persist_directory="./chroma_db"  # 数据持久化到本地文件夹
 )
 
-VECTOR_STORE.persist() # 确保目录存在并加载数据
-
-# LLM 配置 (使用你的配置)
+# LLM api 初始化
 llm = ChatOpenAI(
     model="qwen-plus",
     temperature=0.1,
-    # 建议将 Key 放入环境变量，这里为了演示直接写入（请替换为你自己的 Key）
     openai_api_key="sk-2770a3f619c14f31a87d47924de34af2", 
     openai_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
 )
 
-# ================= 1. 状态定义 =================
+
+# 定义状态节点，包含短期记忆消息列表、重写的搜索查询和检索到的上下文
 class State(TypedDict):
-    # 消息列表（短期记忆）
-    messages: Annotated[list, add_messages]
-    # 改写后的独立查询语句（用于检索）
+    messages: Annotated[list, add_messages]  # 当某个节点返回 {"messages": [新消息]} 时，LangGraph 不会覆盖旧列表，而是自动 append (追加)
     search_query: str
-    # 从向量库检索到的上下文
-    retrieved_context: str
+    retrieved_context: str 
 
-# ================= 2. 核心功能函数 =================
 
-def archive_logic(messages: List[BaseMessage]):
-    """
-    将旧消息总结并存入向量库
-    """
-    if len(messages) < SUMMARY_BATCH_SIZE:
-        return
-    
-    # 1. 提取要归档的消息 (最早的几条)
-    msgs_to_archive = messages[:SUMMARY_BATCH_SIZE]
-    
-    # 2. 生成摘要 (让 LLM 总结这几条对话的内容)
-    # 我们把原始对话转成字符串
-    chat_text = "\n".join([f"{m.type}: {m.content}" for m in msgs_to_archive])
-    prompt = f"请简要总结以下对话的内容，保留关键信息（如人名、事件、偏好）：\n\n{chat_text}"
-    summary = llm.invoke(prompt).content
-    
-    print(f"\n[系统] 正在归档旧记忆 -> 摘要: {summary}")
-    
-    # 3. 存入向量数据库
-    # 我们存储摘要，元数据里可以放原始对话，方便检索
-    VECTOR_STORE.add_texts(
-        texts=[f"历史对话摘要: {summary}. 原始详情: {chat_text}"],
-        metadatas=[{"source": "conversation_archive"}]
-    )
-
-# ================= 3. 节点定义 =================
-
-def memory_manager_node(state: State):
-    """
-    节点：管理短期记忆。
-    如果消息太多，就归档旧消息到向量库，并从 State 中删除它们。
-    """
-
-    messages = state["messages"]
-    
-    # 如果消息数超过窗口限制
-    if len(messages) > SHORT_TERM_WINDOW_SIZE:
-        # 1. 触发归档逻辑（存入向量库）
-        archive_logic(messages)
-        
-        # 2. 构建“删除消息”的操作
-        # LangGraph 中使用 RemoveMessage(id) 来删除特定消息
-        delete_ops = [RemoveMessage(id=m.id) for m in messages[:SUMMARY_BATCH_SIZE]]
-        
-        return {"messages": delete_ops}
-    
-    return {} # 状态无变化
-
+# 根据State里面的message（短期记忆）重写问题，最终将重写的问题填到State的search_query字段里
+# prompt的格式是：【历史】... 【当前输入】... 【改写结果】: 
 def query_rewriter_node(state: State):
-    """
-    节点：查询重写（修复版）。
-    增加了 Few-Shot 示例和强约束，防止 LLM 直接回答用户问题。
-    """
+    clean_context = "" # 清空上一轮上下文
+    
+    # 获取状态里的消息列表
     messages = state["messages"]
-    last_user_msg = messages[-1].content
+    last_user_msg = messages[-1].content    # 最新用户输入
+    history = messages[:-1]                 # 历史消息（不含最新用户输入）
     
-    # 获取除最后一条外的历史消息作为上下文
-    history_msgs = messages[:-1]
-    
-    # 将历史消息格式化为文本，供 Prompt 使用
-    history_text = "\n".join([f"{m.type}: {m.content}" for m in history_msgs])
+    # 构建历史文本
+    history_text = "\n".join([f"{m.type}: {m.content}" for m in history])
 
-    # --- 核心修改：强化 Prompt ---
-    system_prompt = """你是一个【查询重写工具】，而不是聊天机器人。你的任务是将用户的输入改写为独立的搜索语句。
 
-    ### 核心规则：
-    1. 【绝对禁止】回答用户的问题。无论用户问什么，你只负责改写。
-    2. 结合聊天历史（Chat History），将用户输入（User Input）中的指代词（如“它”、“那个”、“之前提到的”）替换为具体名词。
-    3. 如果用户问题依赖上文（例如“我叫什么？”），请补全主语（例如“用户叫什么名字”）。
-    4. 如果用户输入已经独立且完整，直接原样返回。
-    5. 输出必须纯净，不要包含“好的”、“改写如下”等废话。
-
-    ### 示例演示（Few-Shot）：
-    Case 1:
-    Chat History: 
-    human: 我喜欢苹果。
-    ai: 苹果很好吃。
-    User Input: 它是什么颜色的？
-    Output: 苹果是什么颜色的
-
-    Case 2:
-    Chat History: 
-    human: 我叫小明。
-    ai: 你好小明。
-    User Input: 我叫什么？
-    Output: 小明的名字是什么
-
-    Case 3:
-    Chat History: (无)
-    User Input: 你好
-    Output: 你好
-
-    Case 4:
-    Chat History: ...
-    User Input: 记得我吗？
-    Output: AI是否记得用户
+    # 系统prompt，指导模型如何改写问题
+    system_prompt = """你是一个查询改写工具。
+    任务：结合历史，将用户的最新输入改写为独立、完整的搜索语句。
+    规则：
+    1. 补全主语和指代词（如“它”->具体名词）。
+    2. 严禁回答问题。
+    3. 如果无需改写，原样返回。
     """
     
+    # LangChain 链式调用：Prompt -> LLM -> 解析为字符串
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        ("human", "Chat History:\n{history}\n\nUser Input: {question}\nOutput:")
+        ("human", "历史:\n{history}\n\n当前输入: {question}\n\n改写结果:")
     ])
-    
-    # 强制使用 temperature=0，保证逻辑确定性
-    rewriter_llm = llm.bind(temperature=0)
-    
-    chain = prompt | rewriter_llm | StrOutputParser()
-    
-    # 执行改写
+    chain = prompt | llm | StrOutputParser()
     rewritten_query = chain.invoke({"history": history_text, "question": last_user_msg})
     
-    # 清理一下可能残留的空格或换行
-    rewritten_query = rewritten_query.strip()
+
+    # 输出改写结果，便于调试
+    print(f"\n[1.改写] '{last_user_msg}' -> '{rewritten_query}'")
     
-    print(f"\n[系统] 原始问题: {last_user_msg} -> 改写后检索词: {rewritten_query}")
-    
-    return {"search_query": rewritten_query}
+    # 返回改写后的查询，并清空retrieved_context
+    return {"search_query": rewritten_query, "retrieved_context": clean_context}
 
 
+# 通过上一个节点重写的问题去向量数据库里面进行检索，找到最相关的两条消息，并将结果填到State的retrieved_context字段里
+# 存的格式是：记录1: 摘要 (来源参考: "原文")
 def retriever_node(state: State):
-    """
-    节点：检索。
-    使用改写后的查询去向量库搜索长期记忆。
-    """
+    # 获取上个节点的搜索查询
     query = state["search_query"]
     
-    # 从向量库检索最相关的 2 条片段
-    docs = VECTOR_STORE.similarity_search(query, k=2)
-    
-    context_text = "\n\n".join([d.page_content for d in docs])
-    
-    if context_text:
-        print(f"[系统] 检索到长期记忆: {context_text}")
-    else:
-        print("[系统] 未检索到相关长期记忆。")
-        context_text = "无相关历史记录。"
-        
-    return {"retrieved_context": context_text}
+    # 如果查询过短，直接返回空结果
+    if len(query) < 2:
+        return {"retrieved_context": ""}
 
+    print(f"[2.检索] 搜索: {query}")
+    
+    results = VECTOR_STORE.similarity_search(query, k=2)    # 将 query 转成向量，去数据库比对，找出最相似的 top 2 条记录
+    
+    # 如果没有结果，返回默认提示
+    if not results:
+        return {"retrieved_context": "无相关记录"}
+
+    
+    # 格式：【事实】摘要 (【来源】原文)，这样 LLM 既能快速理解事实，也能在需要时引用原话
+    context_parts = []
+    for i, doc in enumerate(results):
+        summary = doc.page_content
+        raw_quote = doc.metadata.get("raw_content", "无原文")
+        # 限制原文引用的长度，防止 Context 爆炸
+        if len(raw_quote) > 100: raw_quote = raw_quote[:100] + "..."
+        
+        entry = f"记录{i+1}: {summary}\n   (来源参考: \"{raw_quote}\")"
+        context_parts.append(entry)
+    
+    # 拼接最终上下文
+    final_context = "\n\n".join(context_parts)
+    print(f"[2.命中] \n{final_context}")
+    
+    return {"retrieved_context": final_context}
+
+
+# 生成回复的一个节点，将短期记忆和长期记忆结合起来生成回复，并将回复放入State的messages字段里（通过加方法append）
 def generator_node(state: State):
-    """
-    节点：生成回复。
-    综合 系统提示 + 长期记忆(RAG) + 短期记忆 生成最终答案。
-    """
+    # 获取短期记忆和搜索到的长期记忆
     messages = state["messages"]
     context = state["retrieved_context"]
     
-    # 构建 Prompt
-    system_prompt = (
-        "你是一个乐于助人的 AI 助手。\n"
-        "请利用以下检索到的【长期记忆】和当前的【对话历史】来回答用户。\n"
-        "如果长期记忆中有相关信息，请优先参考。\n"
-        "--------------------\n"
-        "【长期记忆】:\n"
-        "{context}\n"
-        "--------------------"
-    )
+    # 构建系统提示，指导模型如何利用短期记忆和长期记忆回答问题
+    system_tmpl = """你是一个助手。请基于【长期记忆】和【当前对话】回答。
+    
+    【长期记忆】:
+    {context}
+    
+    注意：
+    1. 长期记忆中的信息优先于你的通用知识。
+    2. 如果用户询问具体原话，请参考括号中的“来源参考”。
+    """
     
     prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("placeholder", "{messages}"), # 这里的 messages 是 LangGraph 自动管理的短期记忆
+        ("system", system_tmpl),
+        ("placeholder", "{messages}"),
     ])
     
     chain = prompt | llm
-    
-    # 注意：我们将 context 注入到 prompt 模板中，messages 由 graph 传递
     response = chain.invoke({"context": context, "messages": messages})
     
     return {"messages": [response]}
 
-# ================= 4. 建图 =================
 
-conn = sqlite3.connect("checkpoints_advanced.db", check_same_thread=False)
-memory = SqliteSaver(conn)
+# 归档清理节点，将超过短期记忆窗口的消息进行归档处理，存入向量数据库
+# 归档时会生成摘要，并进行重复检测，避免存入重复信息
+def memory_manager_node(state: State):
+    # 获取当前短期记忆消息列表
+    messages = state["messages"]
+    
+    # 获取设定的短期记忆窗口大小
+    keep_count = SHORT_TERM_WINDOW_SIZE
+    total_count = len(messages)
+    
+    # 如果消息数未超出窗口大小，直接返回空操作
+    if total_count <= keep_count:
+        return {}
+    
+    excess_count = total_count - keep_count
+    
+    # 强制归档数为偶数（保证不切断对话对）
+    if excess_count % 2 != 0:
+        excess_count -= 1 
+        
+    if excess_count <= 0:
+        return {}
+        
+    # 切片提取要归档的消息
+    msgs_to_archive = messages[:excess_count]
+    
+    # 准备原文
+    raw_text = "\n".join([f"{m.type}: {m.content}" for m in msgs_to_archive])
+    
+    # 生成摘要的 prompt
+    summary_prompt = f"""将以下对话转化为 1 句独立的陈述句事实。
+    规则：
+    1. 将“我”替换为“User”。
+    2. 去除寒暄，只留干货。
+    3. 字数控制在 60 字以内。
+    
+    对话：
+    {raw_text}
+    """
+    
+    new_summary = llm.invoke(summary_prompt).content.strip()
+    # new_summary = new_summary[:120] 
+    
+    print(f"\n[4.检测] 准备入库: {new_summary}")
+    
+    
+    # 重复检测，查找最相似的一条记录，看看是否足够相似
+    existing_docs = VECTOR_STORE.similarity_search_with_score(new_summary, k=1)
+    
+    is_duplicate = False
+    if existing_docs:
+        doc, score = existing_docs[0]
 
+        # Chroma 的 score 是 L2 距离 (越小越相似)，0.35 约为 Cosine 0.94 左右的相似度
+        if score < 0.35:
+            print(f"   -> 发现重复 (Distance={score:.4f}): '{doc.page_content}'")
+            print("   -> 跳过写入。")
+            is_duplicate = True
+            
+    # 不重复的话，就写入向量库
+    if not is_duplicate:
+        print("   -> 写入向量库。")
+       
+        VECTOR_STORE.add_texts(
+            texts=[new_summary],
+            metadatas=[{"raw_content": raw_text, "timestamp": str(uuid.uuid4())}] 
+        )
+    
+    # 删除操作列表
+    delete_ops = [RemoveMessage(id=m.id) for m in msgs_to_archive]
+    
+    return {"messages": delete_ops}     # 返回删除操作列表，LangGraph 会执行删除
+
+
+# 构建agent的流程图
 builder = StateGraph(State)
 
-# 添加节点
-builder.add_node("memory_manager", memory_manager_node)
 builder.add_node("query_rewriter", query_rewriter_node)
 builder.add_node("retriever", retriever_node)
 builder.add_node("generator", generator_node)
+builder.add_node("memory_manager", memory_manager_node)
 
-# 定义边（执行流程）
-# 1. 入口 -> 检查记忆是否需要归档
-builder.set_entry_point("memory_manager")
-
-# 2. 记忆管理 -> 查询改写
-builder.add_edge("memory_manager", "query_rewriter")
-
-# 3. 查询改写 -> 检索
+builder.set_entry_point("query_rewriter")
 builder.add_edge("query_rewriter", "retriever")
-
-# 4. 检索 -> 生成回复
 builder.add_edge("retriever", "generator")
+builder.add_edge("generator", "memory_manager")
+builder.add_edge("memory_manager", END)
 
-# 5. 生成回复 -> 结束
-builder.add_edge("generator", END)
-
+conn = sqlite3.connect("checkpoints_v5.db", check_same_thread=False)
+memory = SqliteSaver(conn)
 graph = builder.compile(checkpointer=memory)
 
-# ================= 5. 模拟运行 =================
 
-def run_chat(message_text, thread_id):
-    """辅助运行函数"""
+# 一个简短的验证测试
+def run_chat(text, thread_id):
+    print(f"\n>>> 用户: {text}")
     config = {"configurable": {"thread_id": thread_id}}
-    print(f"\n--- 用户: {message_text} ---")
+    for event in graph.stream({"messages": [HumanMessage(content=text)]}, config):
+        pass
     
-    # 发送用户消息
-    input_state = {"messages": [HumanMessage(content=message_text)]}
-    
-    for event in graph.stream(input_state, config):
-        pass # 我们在节点内部打印了日志，这里主要为了驱动流程运行
-        
-    # 获取最后一次状态中的回复
-    snapshot = graph.get_state(config)
-    if snapshot.values and snapshot.values["messages"]:
-        last_msg = snapshot.values["messages"][-1]
+    state = graph.get_state(config).values
+    if state and state["messages"]:
+        last_msg = state["messages"][-1]
         if isinstance(last_msg, AIMessage):
             print(f"AI: {last_msg.content}")
 
-# 初始化一个会话 ID
+
+
+# 测试正式开始
+
+# 生成唯一线程ID
 tid = str(uuid.uuid4())
+print(f"Thread ID: {tid}")
 
-print(f"当前会话 ID: {tid}")
-print(f"短期记忆窗口: {SHORT_TERM_WINDOW_SIZE}, 超限归档数: {SUMMARY_BATCH_SIZE}")
+# 1. 制造数据
+run_chat("你好，我叫王五。", tid)
+run_chat("我是 Python 程序员。", tid)
+run_chat("我特别讨厌 Java。", tid) 
+# 此时积累了 6 条消息 (3对)，超过窗口 4
+# memory_manager 应触发：
+# total=6, keep=4, excess=2. 删除前 2 条 (你好 + 你好回复)。
+# 留下：我是Python程序员...
 
-# --- 第一阶段：填充记忆 ---
-# 我们连续发送几条消息，让 AI 记住信息，并触发记忆归档
-run_chat("你好，我叫小明。", tid)
-run_chat("我是一名软件工程师。", tid)
-run_chat("我最喜欢的编程语言是 Python。", tid)
-# 此时应该有 6 条消息 (3 User + 3 AI)，超过窗口 4
-# 下一次对话开始时，`memory_manager` 会检测到并归档最早的 2 轮对话
+# 2. 测试重复检测
+# 如果用户再次强调同样的事
+run_chat("一定要记住，我是 Python 程序员。", tid)
+# 此时 memory_manager 再次运行，试图归档 "我是Python程序员..." 这一对
+# 因为之前应该已经存过类似的摘要，这次应当触发 [发现重复] -> [跳过写入]
 
-# --- 第二阶段：触发归档与 RAG ---
-print("\n>>> 下一条消息将触发【归档】和【检索】 <<<")
-# 这里的“它”指代模糊，Query Rewriter 应该能将其改写为“小明最喜欢的编程语言是什么”
-# 且因为原始消息可能已被归档，Generator 必须依靠 Retriever 从向量库找回信息
-run_chat("它有什么优点？（测试模糊提问）", tid) 
+# 3. 测试原文回溯
+print("\n=== 测试原文引用能力 ===")
+# 此时 "我特别讨厌 Java" 这句话应该还在短期记忆或刚被归档
+run_chat("我刚才说我讨厌什么语言？原话是什么？", tid)
+# 预期 AI 能答出 "Java"，并可能引用 metadata 中的原话
 
-# --- 第三阶段：测试完全遗忘后的回忆 ---
-print("\n>>> 模拟很久之后，再次询问个人信息 <<<")
-# 此时短期记忆里可能已经没有“我叫小明”这条原始消息了（被删除了）
-# AI 必须通过 RAG 从 Chroma 数据库中找到之前归档的摘要
-run_chat("还记得我叫什么名字吗？", tid)
-
-print("\n✅ 演示结束。数据已存入 chroma_db 和 sqlite。")
+print("\n✅ V5.0 测试完成。")
