@@ -7,18 +7,14 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
 from .config import MemoryAgentConfig
 from .state import State
-from .nodes import (
-    QueryRewriterNode, 
-    RetrieverNode, 
-    GeneratorNode, 
-    MemoryManagerNode
-)
+from .nodes import *
 from .utils import (
     setup_environment,
     create_embeddings,
     create_vector_store,
     create_llm,
-    create_sqlite_connection
+    create_sqlite_connection,
+    create_graph_database
 )
 
 
@@ -68,58 +64,115 @@ class MemoryAgent:
         
         # 创建数据库连接
         self.connection = create_sqlite_connection(self.config.checkpoints_db)
+
+        # 创建图数据库连接
+        self.graph_db = create_graph_database()
     
+    # 初始化所有节点
     def _init_nodes(self):
-        """初始化所有节点"""
-        # 查询重写节点
-        self.query_rewriter_node = QueryRewriterNode(
-            llm=self.llm,
+        # 清理归档消息节点
+        self.clean_up_node = CleanUpNode(
             verbose=self.config.verbose
         )
-        
-        # 检索节点
-        self.retriever_node = RetrieverNode(
-            vector_store=self.vector_store,
+
+        # 回复生成节点
+        self.context_fusion = ContextFusionNode(
             verbose=self.config.verbose
         )
-        
+
         # 生成回复节点
         self.generator_node = GeneratorNode(
             llm=self.llm,
             verbose=self.config.verbose
         )
-        
-        # 记忆管理节点
-        self.memory_manager_node = MemoryManagerNode(
+
+        # 存入图数据库节点
+        self.graph_archiver_node = GraphArchiverNode(
             llm=self.llm,
-            vector_store=self.vector_store,
+            graphDB=self.graph_db,
+            verbose=self.config.verbose
+        )
+
+        # 查询图数据库节点
+        self.graph_retriever_node = GraphRetrieverNode(
+            graphDB=self.graph_db,
+            verbose=self.config.verbose
+        )
+
+        # 内存管理路由
+        self.memory_router_node = MemoryRouterNode(
             short_term_window_size=self.config.short_term_window_size,
             verbose=self.config.verbose
         )
-    
+
+        # 查询重写节点
+        self.query_rewriter_node = QueryRewriterNode(
+            llm=self.llm,
+            verbose=self.config.verbose
+        )
+
+        # 存入向量数据库节点
+        self.vector_archiver_node = VectorArchiverNode(
+            llm=self.llm,
+            vector_store=self.vector_store,
+            verbose=self.config.verbose
+        )
+        
+        # 查询向量数据库节点
+        self.vector_retriever_node = VectorRetrieverNode(
+            vector_store=self.vector_store,
+            verbose=self.config.verbose
+        )
+        
+
+    # 构建agent流程图
     def _build_graph(self):
-        """构建Agent的流程图"""
-        # 创建图构建器
-        builder = StateGraph(State)
-        
-        # 添加节点
-        builder.add_node("query_rewriter", self.query_rewriter_node)
-        builder.add_node("retriever", self.retriever_node)
-        builder.add_node("generator", self.generator_node)
-        builder.add_node("memory_manager", self.memory_manager_node)
-        
-        # 设置流程
-        builder.set_entry_point("query_rewriter")
-        builder.add_edge("query_rewriter", "retriever")
-        builder.add_edge("retriever", "generator")
-        builder.add_edge("generator", "memory_manager")
-        builder.add_edge("memory_manager", END)
+        # 构建agent的流程图
+        workflow = StateGraph(State)
+
+        # 1. 添加节点
+        workflow.add_node("query_processing", self.query_rewriter_node)
+        workflow.add_node("vector_retriever", self.vector_retriever_node)
+        workflow.add_node("graph_retriever", self.graph_retriever_node)
+        workflow.add_node("context_fusion", self.context_fusion)
+        workflow.add_node("generator", self.generator_node)
+        workflow.add_node("memory_router", self.memory_router_node)
+        workflow.add_node("vector_archiver", self.vector_archiver_node)
+        workflow.add_node("graph_archiver", self.graph_archiver_node)
+        workflow.add_node("cleanup", self.clean_up_node)
+
+        # 2. 定义边
+        workflow.set_entry_point("query_processing")
+        workflow.add_edge("query_processing", "vector_retriever")
+        workflow.add_edge("vector_retriever", "graph_retriever")
+        workflow.add_edge("graph_retriever", "context_fusion")
+        workflow.add_edge("context_fusion", "generator")
+        workflow.add_edge("generator", "memory_router")
+
+        # 条件边
+        def should_archive(state: State):
+            if state["msgs_to_archive"]:
+                return "archive"
+            return "end"
+
+        workflow.add_conditional_edges(
+            "memory_router",
+            should_archive,
+            {
+                "archive": "vector_archiver",
+                "end": END
+            }
+        )
+
+        workflow.add_edge("vector_archiver", "graph_archiver")
+        workflow.add_edge("graph_archiver", "cleanup")
+        workflow.add_edge("cleanup", END)
         
         # 编译图
         memory = SqliteSaver(self.connection)
-        self.graph = builder.compile(checkpointer=memory)
+        self.graph = workflow.compile(checkpointer=memory)
     
-    def chat(self, message: str, thread_id: str = None) -> str:
+    def chat(self, message: str, thread_id: str = None, enable_vector=True, enable_graph=True) -> str:
         """
         与Agent进行对话
         
@@ -140,7 +193,9 @@ class MemoryAgent:
             print(f"\n>>> 用户: {message}")
         
         # 配置检查点
-        config = {"configurable": {"thread_id": thread_id}}
+        config = {"configurable": {"thread_id": thread_id,
+                                   "use_vector_memory": enable_vector,
+                                   "use_graph_memory": enable_graph}}
         
         # 运行Agent图
         for event in self.graph.stream(

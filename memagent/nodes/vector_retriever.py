@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 from typing import Dict, Any
 from langchain_chroma import Chroma
+from langchain_core.runnables import RunnableConfig
 
 
-class RetrieverNode:
+class VectorRetrieverNode:
     """检索节点"""
     
     def __init__(self, vector_store: Chroma, verbose: bool = True):
         self.vector_store = vector_store
         self.verbose = verbose
     
-    def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """执行检索"""
+    # 完成检索逻辑
+    def __call__(self, state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
+        # 查询配置
+        config = config or {}
+        conf = config.get("configurable", {})
+
+        # 消融实验开关
+        if not conf.get("use_vector_memory", True):
+            return {"vector_context": ""}
+        
         # 获取搜索查询
         query = state["search_query"]
         

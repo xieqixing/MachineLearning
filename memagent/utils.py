@@ -6,6 +6,7 @@ import sqlite3
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_openai import ChatOpenAI
+from .graphDB import EnhancedGraphDB
 
 
 def setup_environment():
@@ -49,3 +50,11 @@ def create_llm(
 def create_sqlite_connection(db_path: str = "checkpoints.db"):
     """创建SQLite数据库连接"""
     return sqlite3.connect(db_path, check_same_thread=False)
+
+
+
+def create_graph_database():
+    """创建图数据库连接"""
+    return EnhancedGraphDB()
+        
+    

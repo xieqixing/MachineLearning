@@ -9,7 +9,7 @@ from memagent import MemoryAgent, MemoryAgentConfig
 def main():
     # 创建Agent配置
     config = MemoryAgentConfig(
-        verbose=False,  # 显示详细日志
+        verbose=True,  # 显示详细日志
         checkpoints_db="memory_agent_checkpoints.db"
     )
     
@@ -20,18 +20,21 @@ def main():
         tid = str(uuid.uuid4())
         # 示例1: 创建新对话
         print("=== 示例1: 新对话 ===")
-        response = agent.chat("你好，我叫王五。", thread_id=tid)
+        response = agent.chat("我最近特别沉迷《黑暗之魂》，它是宫崎英高做的游戏，难度很高。", thread_id=tid)
         print(f"AI回复: {response}")
         
-        # 示例2: 继续对话
-        print("\n=== 示例2: 继续对话 ===")
-        response = agent.chat("我是 Python 程序员。", thread_id=tid)
+        
+        response = agent.chat("凑字数 " * 40, thread_id=tid)
+        print(f"AI回复: {response}")
+
+        response = agent.chat("我叫王五，你叫什么？", thread_id=tid)
         print(f"AI回复: {response}")
 
         
-        # 示例3: 测试记忆功能
-        print("\n=== 示例3: 测试记忆功能 ===")
-        response = agent.chat("我刚才说我叫什么名字？", thread_id=tid)
+        response = agent.chat("我刚才提到的那个游戏的制作人是谁？", thread_id=tid)
+        print(f"AI回复: {response}")
+
+        response = agent.chat("你刚才提到的黑暗之魂有哪些特点？", thread_id=tid)
         print(f"AI回复: {response}")
         
         # 获取记忆统计

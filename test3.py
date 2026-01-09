@@ -347,7 +347,7 @@ def vector_archiver_node(state: AgentState, config: RunnableConfig = None):
     for pair in pairs:
         pair_text = "\n".join([f"{'User' if isinstance(m, HumanMessage) else 'AI'}: {m.content}" for m in pair])
 
-        # 生成摘要的 prompt(目前只存摘要，随时改成存原文)
+        # 生成摘要的 prompt()
         summary_prompt = f"""将以下对话转化为 1 句独立的陈述句事实。
         规则：
         1. 将“我”替换为“User”。

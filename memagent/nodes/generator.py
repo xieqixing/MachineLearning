@@ -14,27 +14,23 @@ class GeneratorNode:
     
     def _setup_prompts(self):
         """设置提示模板"""
-        self.system_tmpl = """你是一个助手。请基于【长期记忆】和【当前对话】回答。
+        self.system_tmpl = """你是一个拥有【非结构化文本记忆】和【结构化知识图谱】的智能助手。
+    请基于提供的上下文回答问题。
         
-        【长期记忆】:
+        上下文:
         {context}
-        
-        注意：
-        1. 长期记忆中的信息优先于你的通用知识。
-        2. 如果用户询问具体原话，请参考括号中的"来源参考"。
         """
         
-        self.prompt_template = ChatPromptTemplate.from_messages([
-            ("system", self.system_tmpl),
-            ("placeholder", "{messages}"),
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", self.system_tmpl ),
+            ("placeholder", "{messages}")
         ])
-        self.chain = self.prompt_template | self.llm
+        self.chain = prompt | self.llm
     
     def __call__(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """生成回复"""
-        # 获取短期记忆和搜索到的长期记忆
+        # 获取滑动窗口（短期记忆）和融合后的上下文（长期记忆）
         messages = state["messages"]
-        context = state["retrieved_context"]
+        context = state["final_context"]
         
         # 生成回复
         response = self.chain.invoke({
@@ -42,4 +38,5 @@ class GeneratorNode:
             "messages": messages
         })
         
+        # 生成回复，append到消息列表里面去
         return {"messages": [response]}
