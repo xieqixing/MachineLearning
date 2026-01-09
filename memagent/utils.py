@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import os
+
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 import sqlite3
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
