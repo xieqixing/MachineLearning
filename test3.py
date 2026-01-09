@@ -51,43 +51,8 @@ llm = ChatOpenAI(
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)  # 文本切分器，用于归档时将长文本切分为更小块
 encoding = tiktoken.get_encoding("cl100k_base")     # 用于计算 Token 数量
 
-# 3. 模拟图数据库 (基于 NetworkX)
-class LocalGraphDB:
-    def __init__(self):
-        self.graph = nx.DiGraph()
-    
-    # 添加三元组: [[Head, Relation, Tail], ...]
-    def add_triples(self, triples: List[List[str]]):
-        for item in triples:
-            if len(item) == 3:
-                head, relation, tail = item
-                self.graph.add_edge(head, tail, relation=relation)
-                print(f"      [Graph Write] ({head}) --[{relation}]--> ({tail})")
 
-    # 查询邻居信息（需要实现模糊查询吗？需要实现多跳吗？）
-    def get_neighbors(self, entities: List[str]) -> str:
-        result_lines = []
-        for entity in entities:
-            if not self.graph.has_node(entity):
-                continue
-            
-            # 查找出边
-            out_edges = self.graph.out_edges(entity, data=True)
-            for u, v, data in out_edges:
-                rel = data.get('relation', 'related_to')
-                result_lines.append(f"- {u} {rel} {v}")
-            
-            # 查找入边
-            in_edges = self.graph.in_edges(entity, data=True)
-            for u, v, data in in_edges:
-                rel = data.get('relation', 'related_to')
-                result_lines.append(f"- {u} {rel} {v}")
-                
-        if not result_lines:
-            return ""
-        return "\n".join(list(set(result_lines)))
-    
-    
+
 # 3. 模拟图数据库 (基于 NetworkX)
 class EnhancedGraphDB:
     def __init__(self):
@@ -163,24 +128,31 @@ def query_processing_node(state: AgentState, config: RunnableConfig = None):
     # 确保 config 不为 None
     config = config or {}
     
-    # 获取状态里的消息列表，最后一条是最新用户输入
+    # 获取状态里的消息列表
     messages = state["messages"]
-    last_user_msg = messages[-1].content
+    last_user_msg = messages[-1].content    # 最新用户输入
+    history = messages[:-1]                 # 历史消息（不含最新用户输入）
     
-    # 查询改写的 prompt
-    rewrite_prompt = ChatPromptTemplate.from_messages([
-        ("system", """你是一个查询改写工具。
-            任务：结合历史，将用户的最新输入改写为独立、完整的搜索语句。
-            规则：
-            1. 补全主语和指代词（如“它”->具体名词）。
-            2. 严禁回答问题。
-            3. 如果无需改写，原样返回。
-    """),
-        ("human", "{text}")
-    ])
+    # 构建历史文本
+    history_text = "\n".join([f"{m.type}: {m.content}" for m in history])
 
-    # 调用api进行查询改写
-    rewritten = (rewrite_prompt | llm | StrOutputParser()).invoke(last_user_msg)
+
+    # 系统prompt，指导模型如何改写问题
+    system_prompt = """你是一个查询改写工具。
+    任务：结合历史，将用户的最新输入改写为独立、完整的搜索语句。
+    规则：
+    1. 补全主语和指代词（如“它”->具体名词）。
+    2. 严禁回答问题。
+    3. 如果无需改写，原样返回。
+    """
+
+    # LangChain 链式调用：Prompt -> LLM -> 解析为字符串
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "历史:\n{history}\n\n当前输入: {question}\n\n改写结果:")
+    ])
+    chain = prompt | llm | StrOutputParser()
+    rewritten = chain.invoke({"history": history_text, "question": last_user_msg})
     
     
     entities = []   
@@ -374,9 +346,23 @@ def vector_archiver_node(state: AgentState, config: RunnableConfig = None):
     docs_to_add = []
     for pair in pairs:
         pair_text = "\n".join([f"{'User' if isinstance(m, HumanMessage) else 'AI'}: {m.content}" for m in pair])
+
+        # 生成摘要的 prompt(目前只存摘要，随时改成存原文)
+        summary_prompt = f"""将以下对话转化为 1 句独立的陈述句事实。
+        规则：
+        1. 将“我”替换为“User”。
+        2. 去除寒暄，只留干货。
+        3. 字数控制在 100 字以内。
         
+        对话：
+        {pair_text}
+        """
+    
+        new_summary = llm.invoke(summary_prompt).content.strip()
+
+    
         # 查重: 检查库里是否已经有非常相似的
-        existing = VECTOR_STORE.similarity_search_with_score(pair_text, k=1)
+        existing = VECTOR_STORE.similarity_search_with_score(new_summary, k=1)
         if existing and existing[0][1] < 0.1: # 距离极小则跳过
             print(f"      [Vector Skip] 发现重复内容")
             continue
