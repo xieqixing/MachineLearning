@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import uuid
+import shutil
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -206,6 +208,8 @@ class MemoryAgent:
         
         # 获取最终状态
         state = self.graph.get_state(config).values
+        return state
+    
         if state and state["messages"]:
             last_msg = state["messages"][-1]
             if isinstance(last_msg, AIMessage):
@@ -213,8 +217,8 @@ class MemoryAgent:
                 if self.config.verbose:
                     print(f"AI: {response}")
                 return response
-        
         return ""
+        
     
     def get_conversation_history(self, thread_id: str) -> List[BaseMessage]:
         """
@@ -277,3 +281,69 @@ class MemoryAgent:
             self.connection.close()
             if self.config.verbose:
                 print("Agent已关闭")
+
+        try:
+            self.graph_db.clear()
+        except Exception as e:
+            print(f"[Reset Warn] 清空图失败: {e}")
+    
+
+    def reset_all_storages(
+        self,
+        delete_vector_store: bool = True,
+        delete_checkpoint_db: bool = True,
+        clear_graph: bool = True,
+    ):
+        """
+        删除/清空三类存储：
+        1) 图数据库：NetworkX 内存图（clear）
+        2) 向量数据库：Chroma 的 persist_directory 文件夹（rm -rf）
+        3) checkpoint：SqliteSaver 使用的 sqlite 文件（rm）
+        """
+        # 1) 图（内存）
+        if clear_graph:
+            try:
+                self.graph_db.clear()
+            except Exception as e:
+                print(f"[Reset Warn] 清空图失败: {e}")
+
+        # 2) Chroma 向量库目录（文件）
+        if delete_vector_store:
+            chroma_path = Path(self.config.vector_store_path)
+            if chroma_path.exists():
+                try:
+                    shutil.rmtree(chroma_path)
+                    print(f"[Reset] 已删除向量库目录: {self.config.vector_store_path}")
+                except Exception as e:
+                    print(f"[Reset Warn] 删除向量库目录失败: {e}")
+            else:
+                print(f"[Reset] 向量库目录不存在，跳过: {self.config.vector_store_path}")
+
+
+        # # 关键：重新创建空目录并重新实例化 Chroma
+        # chroma_path.mkdir(parents=True, exist_ok=True)
+        # self.vector_store = create_vector_store(
+        #     embedding_function=self.embeddings,
+        #     persist_directory=str(chroma_path)
+        # )
+        # print("[Reset] 向量库已重新初始化")
+    
+        # 3) sqlite checkpoint 文件（注意先关闭连接）
+        if delete_checkpoint_db:
+            try:
+                # 关闭全局 conn（如果还开着会导致 Windows 上删除失败；Linux 一般也建议关）
+                try:
+                    self.connection.close()
+                except Exception:
+                    pass
+
+                db_path = Path(self.config.checkpoints_db)
+                if db_path.exists():
+                    db_path.unlink()
+                    print(f"[Reset] 已删除 SQLite checkpoint: {self.config.checkpoints_db}")
+                else:
+                    print(f"[Reset] SQLite checkpoint 不存在，跳过: {self.config.checkpoints_db}")
+            except Exception as e:
+                print(f"[Reset Warn] 删除 checkpoint 失败: {e}")
+
+        print("[Reset] 完成。")

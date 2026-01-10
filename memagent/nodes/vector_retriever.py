@@ -7,9 +7,10 @@ from langchain_core.runnables import RunnableConfig
 class VectorRetrieverNode:
     """检索节点"""
     
-    def __init__(self, vector_store: Chroma, verbose: bool = True):
+    def __init__(self, vector_store: Chroma, verbose: bool = True, max_distance: float = 0.35):
         self.vector_store = vector_store
         self.verbose = verbose
+        self.max_distance = max_distance
     
     # 完成检索逻辑
     def __call__(self, state: Dict[str, Any], config: RunnableConfig = None) -> Dict[str, Any]:
@@ -26,7 +27,7 @@ class VectorRetrieverNode:
         
         # 如果查询过短，直接返回空结果
         if len(query) < 2:
-            return {"retrieved_context": ""}
+            return {"vector_context": ""}
         
         if self.verbose:
             print(f"[2.检索] 搜索: {query}")
@@ -36,11 +37,21 @@ class VectorRetrieverNode:
         
         # 如果没有结果，返回默认提示
         if not results:
-            return {"retrieved_context": "无相关记录"}
+            return {"vector_context": "无相关记录"}
+
+        # 过滤：distance 越小越相似；太大视为不相关
+        kept = [(doc, dist) for doc, dist in results if dist <= self.max_distance]
+
+        if self.verbose:
+            print("[2.检索] distances:", [round(dist, 4) for _, dist in results])
+            print("[2.检索] kept:", [round(dist, 4) for _, dist in kept])
+
+        if not kept:
+            return {"vector_context": ""}
         
         # 格式化检索结果
         context_parts = []
-        for i, doc in enumerate(results):
+        for i, doc in enumerate(kept):
             summary = doc.page_content
             raw_quote = doc.metadata.get("raw_content", "无原文")
             if len(raw_quote) > 100:
@@ -55,4 +66,4 @@ class VectorRetrieverNode:
         if self.verbose:
             print(f"[2.命中] \n{final_context}")
         
-        return {"retrieved_context": final_context}
+        return {"vector_context": final_context}

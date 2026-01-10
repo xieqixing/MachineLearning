@@ -47,6 +47,9 @@ def main():
         # 关闭Agent
         agent.close()
 
+        # 删除所有数据库
+        agent.reset_all_storages()
+
 
 if __name__ == "__main__":
     main()

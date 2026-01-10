@@ -15,3 +15,7 @@ env/
 *.db
 *.sqlite3
 chroma_db/
+
+# evaluation
+wandb/
+*.json
