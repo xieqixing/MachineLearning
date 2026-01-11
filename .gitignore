@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+.env
+
+# DB
+*.db
+*.sqlite3
+chroma_db/
+
+# evaluation
+wandb/
+*.json
+eval_runs/
+data_generation/background.txt
+test/
