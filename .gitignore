@@ -19,3 +19,6 @@ chroma_db/
 # evaluation
 wandb/
 *.json
+eval_runs/
+data_generation/background.txt
+test/

@@ -39,19 +39,19 @@ class VectorRetrieverNode:
         if not results:
             return {"vector_context": "无相关记录"}
 
-        # 过滤：distance 越小越相似；太大视为不相关
-        kept = [(doc, dist) for doc, dist in results if dist <= self.max_distance]
+        # # 过滤：distance 越小越相似；太大视为不相关
+        # kept = [(doc, dist) for doc, dist in results if dist <= self.max_distance]
 
-        if self.verbose:
-            print("[2.检索] distances:", [round(dist, 4) for _, dist in results])
-            print("[2.检索] kept:", [round(dist, 4) for _, dist in kept])
+        # if self.verbose:
+        #     print("[2.检索] distances:", [round(dist, 4) for _, dist in results])
+        #     print("[2.检索] kept:", [round(dist, 4) for _, dist in kept])
 
-        if not kept:
-            return {"vector_context": ""}
+        # if not kept:
+        #     return {"vector_context": ""}
         
         # 格式化检索结果
         context_parts = []
-        for i, doc in enumerate(kept):
+        for i, doc in enumerate(results):
             summary = doc.page_content
             raw_quote = doc.metadata.get("raw_content", "无原文")
             if len(raw_quote) > 100:

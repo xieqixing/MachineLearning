@@ -6,8 +6,8 @@ from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 # ================= 配置 =================
-OUTPUT_FILE = "experiment_dataset.json"
-NUM_SAMPLES = 2  # 生成多少组测试数据
+OUTPUT_FILE = "experiment_dataset_easy.json"
+NUM_SAMPLES = 10  # 生成多少组测试数据
 DISTRACTOR_MSG_COUNT = 10  # 干扰消息的条数 (确保足够把事实挤出窗口)
 DISTRACTOR_MSG_LEN = 100   # 每条干扰消息大概多少字
 

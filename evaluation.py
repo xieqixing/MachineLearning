@@ -22,7 +22,7 @@ PROJECT_NAME = "LLM-Memory-System-Final"
 eval_llm = ChatOpenAI(
     model="qwen-plus", 
     temperature=0,
-    openai_api_key="sk-2770a3f619c14f31a87d47924de34af2",
+    openai_api_key="sk-0a3f574aeed045e3b4d2584e5bc7c291",
     openai_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
 )
 
@@ -68,6 +68,7 @@ def run_evaluation():
         {"name": "Hybrid (Full)",     "vec": True,  "graph": True},
     ]
 
+
     print(f"🚀 开始评测，共 {len(dataset)} 个样本 x {len(configs)} 种配置")
 
     BASE_RUN_DIR = Path("./eval_runs")   # 所有评测产物放这里
@@ -96,12 +97,13 @@ def run_evaluation():
             agent = MemoryAgent(config)
             
             # --- 阶段 1: 记忆植入 ---
-            agent.chat(
-                item["fact"], 
-                thread_id=thread_id,
-                enable_vector=conf["vec"], 
-                enable_graph=conf["graph"]
-            )
+            if item.get("fact"):
+                agent.chat(
+                    item["fact"], 
+                    thread_id=thread_id,
+                    enable_vector=conf["vec"], 
+                    enable_graph=conf["graph"]
+                )
             
             # --- 阶段 2: 多轮干扰 (关键步骤) ---
             # 这一步会多次调用 Agent，模拟时间流逝和上下文滑动
