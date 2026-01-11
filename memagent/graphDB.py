@@ -18,25 +18,23 @@ class EnhancedGraphDB:
                 tail = tail.strip()
                 relation = relation.strip()
                 
-                # --- 优化1: 查重与合并逻辑 ---
+                # 查重与合并逻辑
                 if self.graph.has_edge(head, tail):
                     # 获取现有的关系数据
                     existing_data = self.graph.get_edge_data(head, tail)
                     existing_relation = existing_data.get('relation', '')
                     
-                    # 1. 如果关系完全一样，直接跳过 (避免重复日志和操作)
+                    # 1如果关系完全一样，直接跳过
                     if relation == existing_relation:
-                         # print(f"      [Graph Skip] ({head}) --[{relation}]--> ({tail}) 已存在") # 可选日志
                         continue
                     
-                    # 2. 如果关系不一样，进行追加合并 (例如: "Author" -> "Author, Designer")
-                    # 避免 "喜欢" 被 "认识" 覆盖
+                    # 如果关系不一样，进行追加合并
                     if relation not in existing_relation:
                         new_relation = f"{existing_relation}, {relation}"
                         self.graph[head][tail]['relation'] = new_relation
                         print(f"      [Graph Update] ({head}) --[{new_relation}]--> ({tail})")
                 else:
-                    # 3. 新边，直接添加
+                    # 如果是新边，直接添加
                     self.graph.add_edge(head, tail, relation=relation)
                     print(f"      [Graph Write] ({head}) --[{relation}]--> ({tail})")
 
@@ -48,13 +46,12 @@ class EnhancedGraphDB:
         # 使用 difflib 查找最接近的匹配，cutoff=0.6 表示相似度至少 60%
         matches = difflib.get_close_matches(query_entity, all_nodes, n=1, cutoff=0.6)
 
-        # 输出匹配结果
+        # 返回匹配结果
         if matches:
-            # print(f"      [Graph Match] '{query_entity}' -> 映射为 -> '{matches[0]}'")
             return matches[0]
         return None
 
-    # 支持多跳查询 (优化2: 双向查询)
+    # 支持多跳查询
     def get_context(self, entities: List[str], depth=2) -> str:
         found_nodes = []
         for e in entities:
@@ -68,20 +65,18 @@ class EnhancedGraphDB:
         # 使用集合避免重复的边描述
         result_lines = set()
         
-        # 将图转为无向图，仅用于计算“谁在附近”（拓扑距离），这样入边和出边距离都是1
+        # 将图转为无向图，这样入边和出边距离都是1
         undirected_G = self.graph.to_undirected()
 
         for node in found_nodes:
             try:
-                # 1. 找出距离中心节点 depth 范围内的所有节点
-                # single_source_shortest_path_length 返回 {node: distance} 字典
+                # 找出距离中心节点 depth 范围内的所有节点
                 nearby_nodes = nx.single_source_shortest_path_length(undirected_G, node, cutoff=depth).keys()
                 
-                # 2. 在原始有向图中提取这些节点构成的子图
-                # subgraph() 方法返回的子图会保留原始边的方向和属性
+                # 在原始有向图中提取这些节点构成的子图
                 subgraph = self.graph.subgraph(nearby_nodes)
                 
-                # 3. 遍历子图的边，生成文本
+                # 遍历子图的边，生成文本
                 for u, v, data in subgraph.edges(data=True):
                     rel = data.get('relation', 'related_to')
                     result_lines.add(f"- {u} {rel} {v}")

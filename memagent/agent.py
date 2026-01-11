@@ -19,9 +19,8 @@ from .utils import (
     create_graph_database
 )
 
-
+# 具有长期记忆的LLM agent
 class MemoryAgent:
-    """具有长期记忆功能的对话Agent"""
     
     def __init__(self, config: Optional[MemoryAgentConfig] = None):
         """
@@ -45,8 +44,9 @@ class MemoryAgent:
         # 构建图
         self._build_graph()
     
+
+    # 初始化所有组件
     def _init_components(self):
-        """初始化所有组件"""
         # 创建词向量嵌入模型
         self.embeddings = create_embeddings(self.config.embedding_model)
         
@@ -70,6 +70,7 @@ class MemoryAgent:
         # 创建图数据库连接
         self.graph_db = create_graph_database()
     
+
     # 初始化所有节点
     def _init_nodes(self):
         # 清理归档消息节点
@@ -174,6 +175,8 @@ class MemoryAgent:
         memory = SqliteSaver(self.connection)
         self.graph = workflow.compile(checkpointer=memory)
     
+
+    # 对话的接口
     def chat(self, message: str, thread_id: str = None, enable_vector=True, enable_graph=True) -> str:
         """
         与Agent进行对话

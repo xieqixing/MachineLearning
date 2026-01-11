@@ -19,7 +19,6 @@ class MemoryAgentConfig:
     
     @classmethod
     def from_dict(cls, config_dict: dict) -> 'MemoryAgentConfig':
-        """从字典创建配置"""
         return cls(**{
             k: v for k, v in config_dict.items() 
             if k in cls.__dataclass_fields__

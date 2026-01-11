@@ -10,15 +10,14 @@ import numpy as np
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 
-# 导入你的 Agent 代码
-# 假设主文件名为 agent_main.py
+# 导入LLM agent
 from memagent import MemoryAgent, MemoryAgentConfig
 
 # ================= 配置 =================
 DATASET_FILE = "experiment_dataset.json"
 PROJECT_NAME = "LLM-Memory-System-Final"
 
-# 裁判 LLM
+# 用作裁判评分的LLM
 eval_llm = ChatOpenAI(
     model="qwen-plus", 
     temperature=0,
@@ -26,8 +25,8 @@ eval_llm = ChatOpenAI(
     openai_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
 )
 
+# 裁判打分：返回 True/False 和 分数
 def llm_judge(question, answer, truth):
-    """裁判打分：返回 True/False 和 分数"""
     prompt = f"""
     标准答案: {truth}
     AI 回答: {answer}
@@ -44,12 +43,14 @@ def llm_judge(question, answer, truth):
     except:
         return False, 0
 
+
+# 运行评测函数
 def run_evaluation():
-    # 1. 加载数据
+    # 加载数据
     with open(DATASET_FILE, "r", encoding="utf-8") as f:
         dataset = json.load(f)
         
-    # 2. 初始化 WandB
+    # 初始化 WandB
     wandb.init(project=PROJECT_NAME, name="Comprehensive-Eval-v1")
     
     # 定义 WandB 表格列
@@ -60,7 +61,7 @@ def run_evaluation():
     ]
     table = wandb.Table(columns=columns)
     
-    # 3. 定义对比实验组
+    # 定义对比实验组消融实验）
     configs = [
         {"name": "Baseline (No Mem)", "vec": False, "graph": False},
         {"name": "Vector Only",       "vec": True,  "graph": False},
@@ -71,8 +72,10 @@ def run_evaluation():
 
     print(f"🚀 开始评测，共 {len(dataset)} 个样本 x {len(configs)} 种配置")
 
-    BASE_RUN_DIR = Path("./eval_runs")   # 所有评测产物放这里
+    # 所有评测产物放这里
+    BASE_RUN_DIR = Path("./eval_runs")  
 
+    # 循环遍历所有的测试
     for conf in configs:
         print(f"\n--- Running Configuration: {conf['name']} ---")
         
@@ -96,7 +99,7 @@ def run_evaluation():
             # 初始化Agent
             agent = MemoryAgent(config)
             
-            # --- 阶段 1: 记忆植入 ---
+            # 记忆植入
             if item.get("fact"):
                 agent.chat(
                     item["fact"], 
@@ -105,11 +108,9 @@ def run_evaluation():
                     enable_graph=conf["graph"]
                 )
             
-            # --- 阶段 2: 多轮干扰 (关键步骤) ---
+            # 多轮干扰 (关键步骤)
             # 这一步会多次调用 Agent，模拟时间流逝和上下文滑动
-            # 我们不需要记录这里的输出，主要是为了触发 memory_router
             for dist_msg in item["distractor_messages"]:
-                # 【修改点 2】直接传字符串 dist_msg
                 agent.chat(
                     dist_msg, 
                     thread_id=thread_id, 
@@ -117,7 +118,7 @@ def run_evaluation():
                     enable_graph=conf["graph"]
                 )
                 
-            # --- 阶段 3: 提问与测试 ---
+            # 提问与测试
             start_time = time.time()
             
             # 获取 Final State 以检查 Context
@@ -138,8 +139,7 @@ def run_evaluation():
             ai_msg = final_state["messages"][-1].content
             print(ai_msg)
             
-            # 关键指标提取：检查 State 中的 context 是否为空
-            # 注意：你的代码中，如果没命中是返回空字符串 ""
+            # 检查 State 中的 context 是否为空
             vector_hit = 1 if len(final_state.get("vector_context", "")) > 10 else 0
             graph_hit = 1 if len(final_state.get("graph_context", "")) > 10 else 0
             
@@ -172,7 +172,7 @@ def run_evaluation():
 
     wandb.log({"Evaluation Details": table})
     wandb.finish()
-    print("\n✅ 所有评测完成！请前往 WandB 查看可视化报告。")
+    print("\n所有评测完成！请前往 WandB 查看可视化报告。")
 
 if __name__ == "__main__":
     run_evaluation()
