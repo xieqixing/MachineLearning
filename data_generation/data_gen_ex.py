@@ -16,7 +16,7 @@ NOISE_COUNT = 8         # 干扰条数
 llm = ChatOpenAI(
     model="qwen-plus", 
     temperature=0.8,
-    openai_api_key="sk-2770a3f619c14f31a87d47924de34af2",
+    openai_api_key="your_api_key_here",
     openai_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
 )
 

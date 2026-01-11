@@ -18,7 +18,7 @@ DISTRACTOR_LEN = 150     # 干扰消息长度
 llm = ChatOpenAI(
     model="qwen-plus", # 建议用强力模型生成数据，如 qwen-max 或 gpt-4
     temperature=0.8,
-    openai_api_key="sk-2770a3f619c14f31a87d47924de34af2",
+    openai_api_key="your_api_key_here",
     openai_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
 )
 

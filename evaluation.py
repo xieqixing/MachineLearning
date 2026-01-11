@@ -21,7 +21,7 @@ PROJECT_NAME = "LLM-Memory-System-Final"
 eval_llm = ChatOpenAI(
     model="qwen-plus", 
     temperature=0,
-    openai_api_key="sk-0a3f574aeed045e3b4d2584e5bc7c291",
+    openai_api_key="your_api_key_here",
     openai_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
 )
 

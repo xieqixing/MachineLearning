@@ -15,7 +15,7 @@ DISTRACTOR_MSG_LEN = 100   # 每条干扰消息大概多少字
 llm = ChatOpenAI(
     model="qwen-plus", 
     temperature=0.7,
-    openai_api_key="sk-2770a3f619c14f31a87d47924de34af2", 
+    openai_api_key="your_api_key_here", 
     openai_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
 )
 
